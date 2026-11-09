@@ -29,16 +29,32 @@ description: 기능 요청, 버그, Jira 이슈를 hobin 티켓으로 만든다.
 ## 등록 명령
 
 **셸 명령에 요청 원문을 직접 끼워 넣지 않는다.** 원문에 `$(...)`나 따옴표, 줄바꿈이 있으면 셸이 실행해 버린다.
-모든 필드를 **한 줄짜리 JSON**으로 만들어 표준 입력으로 넘긴다. JSON 안의 줄바꿈은 `\n`으로 쓴다.
 
-```bash
-hobin new --json - <<'HOBIN_JSON'
-{"title": "로그인 오류 문구 개선", "source": "jira:WEB-123", "requested_by": "홍길동", "paths": ["src/auth/", "tests/auth/"], "depends": ["T-003"], "goal": "잘못된 로그인 시 원인별로 다른 문구를 보여 준다", "exclude": ["로그인 API 응답 형식"], "decision": ["문구는 기획서 v2 기준"], "eval": ["잘못된 비밀번호 입력 시 '비밀번호가 올바르지 않습니다'가 보인다", "없는 계정 입력 시 '가입되지 않은 이메일입니다'가 보인다", "npm test -- auth 통과"], "request": "요청자가 쓴 원문을 수정하지 않고 그대로. 줄바꿈은 \\n으로"}
-HOBIN_JSON
+1. **Write 도구**로 `.hobin/inbox/<짧은이름>.json` 파일에 모든 필드를 JSON으로 쓴다.
+2. `hobin new --json .hobin/inbox/<짧은이름>.json`을 실행한다. 새 티켓 ID가 출력된다.
+
+```json
+{
+  "title": "로그인 오류 문구 개선",
+  "source": "jira:WEB-123",
+  "requested_by": "홍길동",
+  "paths": ["src/auth/", "tests/auth/"],
+  "depends": ["T-003"],
+  "goal": "잘못된 로그인 시 원인별로 다른 문구를 보여 준다",
+  "exclude": ["로그인 API 응답 형식"],
+  "decision": ["문구는 기획서 v2 기준"],
+  "eval": [
+    "잘못된 비밀번호 입력 시 '비밀번호가 올바르지 않습니다'가 보인다",
+    "없는 계정 입력 시 '가입되지 않은 이메일입니다'가 보인다",
+    "npm test -- auth 통과"
+  ],
+  "request": "요청자가 쓴 원문을 수정하지 않고 그대로"
+}
 ```
 
-- JSON은 반드시 **한 줄**이어야 한다. 그래야 원문 안에 어떤 줄이 있어도 heredoc이 끝나지 않는다.
 - 수정 가능 경로는 고정된 폴더나 파일로 시작해야 한다 (`src/auth/`는 되고 `**/*.ts`는 안 됨).
+- 설정의 공유 파일(`shared_paths`, 예: `package.json`)은 경로에 적지 않아도 모든 티켓이 고칠 수 있다.
+- 기존 테스트를 고쳐야 하는 티켓이면 완료 기준에 "어떤 테스트를 왜 바꾸는지"를 적는다. 테스트 삭제나 skip은 병합 전에 사람 확인으로 넘어간다.
 
 ## Jira 항목 대응
 | Jira | hobin |

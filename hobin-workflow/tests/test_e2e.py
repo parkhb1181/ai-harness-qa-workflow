@@ -490,3 +490,161 @@ class ThirdReview(RepoCase):
         p = self.tc("init", "--skip-cli-check", check=False)
         self.assertEqual(p.returncode, 2)
         self.assertIn("서브모듈", p.stderr)
+
+
+class V02(RepoCase):
+    """0.2에서 고친 것들: 검증 항목 대조, 테스트 약화 감시, 반려, 감시 오탐, 공유 파일, 비용 상한, 라우터 권한."""
+
+    def events(self, tid):
+        return (self.repo / ".hobin/runs" / tid / "events.log").read_text()
+
+    def integ(self, cfg):
+        return Path(cfg["worktree_root"]) / "_integration"
+
+    def count(self, tid, role="worker"):
+        f = Path(self.env["FAKE_STATE"]) / f"{tid}.{role}.count"
+        return int(f.read_text()) if f.exists() else 0
+
+    def test_verifier_must_cover_every_eval_item(self):
+        self.setup_crew()
+        tid = self.tc("new", "t", "--paths", "r/", "--eval", "첫째 기준", "--eval", "둘째 기준", "--request", "x").stdout.strip()
+        self.tc("ready", tid)
+        self.tc("run", "--wait", "--interval", "0.2", FAKE_VERIFIER_OMIT_LAST="1")
+        st = self.state(tid)
+        self.assertEqual(st["status"], "needs_human", self.tc("show", tid).stdout)
+        self.assertIn("둘째 기준", st["question"])
+        self.assertIn("보고하지 않음", st["question"])
+        self.assertEqual(self.count(tid, "verifier"), 2, "빠진 항목이 있으면 한 번 더 검증해야 함")
+        # 모두 보고하면 통과
+        tid2 = self.tc("new", "t2", "--paths", "r/T-002.txt", "--eval", "첫째", "--eval", "둘째", "--request", "x").stdout.strip()
+        self.tc("ready", tid2)
+        self.tc("drop", tid)
+        self.tc("run", "--wait", "--interval", "0.2")
+        self.assertEqual(self.state(tid2)["status"], "merged", self.tc("show", tid2).stdout)
+
+    def test_test_weakening_goes_to_human(self):
+        (self.repo / "tests").mkdir()
+        (self.repo / "tests/test_x.py").write_text("def test_a():\n    assert 1 + 1 == 2\n")
+        self.git("add", "-A"); self.git("commit", "-q", "-m", "tests")
+        cfg = self.setup_crew()
+        tid = self.ticket("r/,tests/")
+        self.tc("run", "--wait", "--interval", "0.2", FAKE_WEAKEN="1")
+        st = self.state(tid)
+        self.assertEqual(st["status"], "needs_human", self.tc("show", tid).stdout)
+        self.assertIn("건너뛰기", st["question"])
+        self.assertIn("단언문 감소", st["question"])
+        self.assertFalse((self.integ(cfg) / "r").exists(), "사람 확인 전에는 병합되면 안 됨")
+        self.assertIn("test_x.py", self.tc("diff", tid).stdout)
+        self.tc("approve", tid)
+        self.tc("run", "--wait", "--interval", "0.2")
+        self.assertEqual(self.state(tid)["status"], "merged")
+
+    def test_reject_reverts_and_sends_back(self):
+        cfg = self.setup_crew()
+        t1 = self.ticket("r/T-001.txt")
+        self.tc("run", "--wait", "--interval", "0.2")
+        iw = self.integ(cfg)
+        self.assertEqual((iw / "r/T-001.txt").read_text(), "ok 0\n")
+        self.assertIn("r/T-001.txt", self.tc("diff", t1).stdout)
+        self.assertEqual(self.tc("reject", t1, check=False).returncode, 2, "사유 없이 반려 불가")
+        self.tc("reject", t1, "파일 내용이 요구와 다릅니다")
+        self.assertFalse((iw / "r/T-001.txt").exists(), "통합 브랜치에서 되돌려져야 함")
+        st = self.state(t1)
+        self.assertEqual(st["status"], "ready")
+        self.assertIn("반려", st["pending_input"][-1])
+        # 워커 작업 공간에는 이전 변경이 다시 살아 있다
+        self.assertEqual((Path(cfg["worktree_root"]) / t1 / "r/T-001.txt").read_text(), "ok 0\n")
+        self.tc("run", "--wait", "--interval", "0.2")
+        self.assertEqual(self.state(t1)["status"], "merged", self.tc("show", t1).stdout)
+        self.assertEqual((iw / "r/T-001.txt").read_text(), "ok 1\n", "고친 결과가 다시 병합돼야 함")
+        self.assertEqual(self.count(t1), 2)
+        # 취소로 반려
+        self.tc("reject", t1, "--drop")
+        self.assertEqual(self.state(t1)["status"], "dropped")
+        self.assertFalse((iw / "r/T-001.txt").exists())
+
+    def test_reject_refuses_when_others_are_stacked(self):
+        self.setup_crew()
+        t1 = self.ticket("r/T-001.txt")
+        t2 = self.tc("new", "t", "--paths", "r/T-002.txt", "--eval", "ok", "--depends", t1).stdout.strip()
+        self.tc("ready", t2)
+        self.tc("run", "--wait", "--interval", "0.2")
+        self.assertEqual(self.state(t2)["status"], "merged")
+        p = self.tc("reject", t1, "이유", check=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn(t2, p.stderr)
+
+    def test_depends_require_done_waits_for_accept(self):
+        self.setup_crew(depends_require="done")
+        t1 = self.ticket("r/T-001.txt")
+        t2 = self.tc("new", "t", "--paths", "r/T-002.txt", "--eval", "ok", "--depends", t1).stdout.strip()
+        self.tc("ready", t2)
+        self.tc("run", "--wait", "--interval", "0.2")
+        self.assertEqual(self.state(t1)["status"], "merged")
+        self.assertEqual(self.state(t2)["status"], "ready", "사람이 확인하기 전 코드 위에 쌓으면 안 됨")
+        self.assertIn("accept 필요", self.tc("status").stdout)
+        self.tc("accept", t1)
+        self.tc("run", "--wait", "--interval", "0.2")
+        self.assertEqual(self.state(t2)["status"], "merged")
+
+    def test_guard_ignores_benign_git_config_changes(self):
+        """워커가 도는 동안 사람이 한 `git remote add`, `git push -u`를 지우거나 멈추면 안 된다."""
+        self.setup_crew()
+        tid = self.ticket()
+        self.tc("run", "--wait", "--interval", "0.2", FAKE_BENIGN="1")
+        self.assertEqual(self.state(tid)["status"], "merged", self.tc("show", tid).stdout)
+        conf = (self.repo / ".git/config").read_text()
+        self.assertIn("https://example.com/x.git", conf)
+        self.assertIn('[branch "main"]', conf)
+        self.assertFalse((self.repo / ".hobin/PAUSED").exists())
+
+    def test_guard_reverts_only_dangerous_keys_and_keeps_backup(self):
+        self.setup_crew()
+        tid = self.ticket()
+        self.tc("run", "--wait", "--interval", "0.2", FAKE_BENIGN="1", FAKE_EVIL="1")
+        self.assertEqual(self.state(tid)["status"], "failed")
+        conf = (self.repo / ".git/config").read_text()
+        self.assertNotIn("fsmonitor", conf)
+        self.assertIn("https://example.com/x.git", conf, "위험하지 않은 변경은 남겨야 함")
+        backups = list((self.repo / ".hobin/guard-backup").glob("*/config"))
+        self.assertTrue(backups and "fsmonitor" in backups[0].read_text())
+
+    def test_shared_file_allowed_and_regenerated_on_conflict(self):
+        cfg = self.setup_crew(shared_paths=["lock.txt"], regen_on_conflict={"lock.txt": "echo regenerated > lock.txt"})
+        t1 = self.ticket("r/T-001.txt")
+        t2 = self.ticket("r/T-002.txt")
+        self.tc("run", "--wait", "--interval", "0.2", FAKE_SHARED="1")
+        for t in (t1, t2):
+            self.assertEqual(self.state(t)["status"], "merged", self.tc("show", t).stdout)
+        iw = self.integ(cfg)
+        self.assertTrue((iw / "lock.txt").exists() and (iw / "r/T-001.txt").exists() and (iw / "r/T-002.txt").exists())
+        self.assertIn("다시 만듦", self.events(t1) + self.events(t2))
+
+    def test_ticket_budget_stops_and_resumes(self):
+        self.setup_crew(budget_usd_per_ticket=0.015)
+        tid = self.ticket()
+        self.tc("run", "--wait", "--interval", "0.2", FAKE_VERIFY_FAIL_FIRST="1")
+        st = self.state(tid)
+        self.assertEqual(st["status"], "needs_human", self.tc("show", tid).stdout)
+        self.assertIn("누적 비용", st["question"])
+        self.assertEqual(self.count(tid), 1)
+        self.tc("reply", tid, "계속")
+        self.tc("run", "--wait", "--interval", "0.2", FAKE_VERIFY_FAIL_FIRST="1")
+        self.assertEqual(self.state(tid)["status"], "merged", self.tc("show", tid).stdout)
+
+    def test_router_settings_gate_human_approvals(self):
+        self.setup_crew()
+        self.assertEqual(self.tc("router", "--print", check=False).returncode, 2, "에이전트 파일이 없으면 안내")
+        self.tc("install-claude-files")
+        out = self.tc("router", "--print").stdout
+        self.assertIn("--agent hobin-router", out)
+        self.assertIn("router-settings.json", out)
+        perms = json.loads((self.repo / ".hobin/router-settings.json").read_text())["permissions"]
+        self.assertIn("Bash(hobin *)", perms["allow"])
+        for c in ("ready", "approve", "accept", "reject"):
+            self.assertIn(f"Bash(hobin {c} *)", perms["ask"])
+        self.assertTrue(any(a.startswith("Edit(//") and a.endswith("/.hobin/inbox/**)") for a in perms["allow"]))
+        # 파일로 티켓 만들기 (라우터가 쓰는 방식)
+        (self.repo / ".hobin/inbox/t.json").write_text(json.dumps({"title": "파일 입력", "paths": ["r/"], "eval": ["ok"], "request": "$(touch x)"}))
+        tid = self.tc("new", "--json", ".hobin/inbox/t.json").stdout.strip()
+        self.assertEqual(self.state(tid)["status"], "draft")

